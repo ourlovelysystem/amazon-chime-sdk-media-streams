@@ -35,8 +35,11 @@ const fastify = Fastify({
 const REGION = process.env.REGION || 'us-east-1';
 const SIP_MEDIA_APPLICATION_ID = process.env.SIP_MEDIA_APPLICATION_ID || '';
 const MEETING_TABLE = process.env.MEETING_TABLE || '';
+// anthropic.claude-instant-v1 is retired (ResourceNotFoundException). Current
+// Claude models on Bedrock require an inference profile ID for on-demand
+// invocation, not a bare model ID.
 const BEDROCK_MODEL =
-  process.env.BEDROCK_MODEL || 'anthropic.claude-instant-v1';
+  process.env.BEDROCK_MODEL || 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
 
 const bedrockClient = new BedrockRuntimeClient({
   region: REGION,
@@ -189,7 +192,7 @@ async function startTranscription(stream: Readable, meetingId: string) {
 
           let text = JSON.parse(
             new TextDecoder().decode(bedrockResponse.body),
-          ).completion;
+          ).content[0].text;
           text = text.replace(/'/g, '’'); // Replacing ' with ’
           text = text.replace(/:/g, '.'); // Replacing : with .
           text = text.replace(/\n/g, ' '); // Remove \n
@@ -213,11 +216,21 @@ async function startTranscription(stream: Readable, meetingId: string) {
 function preparePrompt(promptRequest: string) {
   return {
     body: JSON.stringify({
-      prompt:
-        '\n\nHuman: This is a question from a caller.  In a few sentences provide an answer to this question.\n\n' +
-        promptRequest +
-        '\n\nAssistant:',
-      max_tokens_to_sample: 4000,
+      anthropic_version: 'bedrock-2023-05-31',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text:
+                'This is a question from a caller.  In a few sentences provide an answer to this question.\n\n' +
+                promptRequest,
+            },
+          ],
+        },
+      ],
+      max_tokens: 4000,
     }),
     modelId: BEDROCK_MODEL,
     accept: 'application/json',
