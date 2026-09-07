@@ -34,6 +34,11 @@ export class AmazonChimeSDKMediaStreams extends Stack {
       description: 'Immutable Git revision used for this deployment.',
     });
 
+    const responseRoute = new CfnParameter(this, 'ResponseRouteParameter', {
+      type: 'String', default: 'bedrock', allowedValues: ['bedrock', 'igor_bridge'],
+      description: 'Final transcript route; bedrock is the immediate rollback option.',
+    });
+
     const kinesisVideoPoolStreamResources = new KinesisVideoStreamPoolResources(
       this,
       'KinesisVideoStreamPoolResources',
@@ -69,6 +74,7 @@ export class AmazonChimeSDKMediaStreams extends Stack {
       albSecurityGroup: vpcResources.albSecurityGroup,
       callsPerTaskMetric: cloudWatchResources.callsPerTaskMetric,
       igorBridgeFunctionArn: 'arn:aws:lambda:us-east-1:867712763388:function:igor-reference-compatible-igor-bridge',
+      responseRoute: responseRoute.valueAsString,
     });
 
     new EventBridgeResources(this, 'eventBridgeResources', {

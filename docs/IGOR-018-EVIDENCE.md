@@ -24,7 +24,7 @@ No Connect, phone number, KVS stream/pool, Fargate service, VPC/NAT, Transcribe 
 
 ## Conservative deployment and rollback
 
-Initial configuration is `RESPONSE_ROUTE=bedrock`, so original behavior stays active. To activate Igor after nonphysical verification, update only the existing ECS task definition environment to `RESPONSE_ROUTE=igor_bridge` while retaining `IGOR_BRIDGE_FUNCTION_NAME=igor-reference-compatible-igor-bridge`; do not create any service or telephone resource. Immediate rollback is the inverse one-value update to `RESPONSE_ROUTE=bedrock`. If a full source rollback is needed, deploy immutable `gate1-green` commit `65d8f45e661914bceeba28eded1d9c961031aa1a` to the same `AmazonChimeSDKMediaStreams` stack.
+`ResponseRouteParameter` accepts `igor_bridge` and `bedrock`; the parameter default is `bedrock` and its deployed value for IGOR-018 is `igor_bridge`. Bedrock remains immediately available: rollback is a one-value update of the existing stack parameter to `ResponseRouteParameter=bedrock`, retaining `IGOR_BRIDGE_FUNCTION_NAME=igor-reference-compatible-igor-bridge`; do not create any service or telephone resource. If a full source rollback is needed, deploy immutable `gate1-green` commit `65d8f45e661914bceeba28eded1d9c961031aa1a` to the same `AmazonChimeSDKMediaStreams` stack.
 
 ## Remaining physical requirement
 

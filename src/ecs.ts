@@ -29,6 +29,7 @@ interface ECSResourcesProps {
   albSecurityGroup: SecurityGroup;
   callsPerTaskMetric: IMetric;
   igorBridgeFunctionArn: string;
+  responseRoute: string;
 }
 
 export class ECSResources extends Construct {
@@ -128,7 +129,7 @@ export class ECSResources extends Construct {
             MEETING_TABLE: props.meetingTable.tableName,
             REGION: Stack.of(this).region,
             // bedrock remains the initial deployed rollback route; change only this value to use Igor.
-            RESPONSE_ROUTE: 'bedrock',
+            RESPONSE_ROUTE: props.responseRoute,
             IGOR_BRIDGE_FUNCTION_NAME: props.igorBridgeFunctionArn,
           },
         },
