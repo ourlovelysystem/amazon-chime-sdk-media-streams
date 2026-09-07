@@ -28,6 +28,7 @@ interface ECSResourcesProps {
   vpc: Vpc;
   albSecurityGroup: SecurityGroup;
   callsPerTaskMetric: IMetric;
+  igorBridgeFunctionArn: string;
 }
 
 export class ECSResources extends Construct {
@@ -47,6 +48,9 @@ export class ECSResources extends Construct {
               actions: ['bedrock:InvokeModel'],
             }),
           ],
+        }),
+        ['IgorBridgePolicy']: new PolicyDocument({
+          statements: [new PolicyStatement({ resources: [props.igorBridgeFunctionArn], actions: ['lambda:InvokeFunction'] })],
         }),
         ['ChimePolicy']: new PolicyDocument({
           statements: [
@@ -123,6 +127,9 @@ export class ECSResources extends Construct {
             SIP_MEDIA_APPLICATION_ID: props.sipMediaApplication.sipMediaAppId,
             MEETING_TABLE: props.meetingTable.tableName,
             REGION: Stack.of(this).region,
+            // bedrock remains the initial deployed rollback route; change only this value to use Igor.
+            RESPONSE_ROUTE: 'bedrock',
+            IGOR_BRIDGE_FUNCTION_NAME: props.igorBridgeFunctionArn,
           },
         },
         publicLoadBalancer: true,

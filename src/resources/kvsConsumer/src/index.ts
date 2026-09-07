@@ -9,6 +9,7 @@ import {
   UpdateSipMediaApplicationCallCommand,
 } from '@aws-sdk/client-chime-sdk-voice';
 import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
+import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import {
   KinesisVideoClient,
   GetDataEndpointCommand,
@@ -27,6 +28,7 @@ import {
 } from '@aws-sdk/client-transcribe-streaming';
 import Fastify from 'fastify';
 import ffmpeg from 'fluent-ffmpeg';
+import { handleFinalTranscript, TranscriptDeduplicator } from './routing';
 
 const fastify = Fastify({
   logger: false,
@@ -40,12 +42,17 @@ const MEETING_TABLE = process.env.MEETING_TABLE || '';
 // invocation, not a bare model ID.
 const BEDROCK_MODEL =
   process.env.BEDROCK_MODEL || 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
+// Deliberately defaults to the gate1-green-compatible route for rollback safety.
+const RESPONSE_ROUTE = process.env.RESPONSE_ROUTE || 'bedrock';
+const IGOR_BRIDGE_FUNCTION_NAME = process.env.IGOR_BRIDGE_FUNCTION_NAME || '';
 
 const bedrockClient = new BedrockRuntimeClient({
   region: REGION,
 });
 const ddbClient = new DynamoDBClient({ region: REGION });
 const chimeSdkVoiceClient = new ChimeSDKVoiceClient({ region: REGION });
+const lambdaClient = new LambdaClient({ region: REGION });
+const transcriptDeduplicator = new TranscriptDeduplicator();
 
 interface KVSStreamDetails {
   streamArn: string;
@@ -63,7 +70,7 @@ interface Event {
 fastify.post('/call', async (request, reply) => {
   try {
     const event = request.body as Event;
-    console.log('EVENT:', JSON.stringify(event, null, 2));
+    console.log('call_received');
 
     const streamArn = event.callerStreamArn;
     const meetingId = event.meetingId;
@@ -97,9 +104,9 @@ async function readKVSConvertWriteAndTranscribe({
     StreamARN: streamArn,
   });
 
-  console.log(`Fetching data endpoint: ${JSON.stringify(getDataCmd, null, 2)}`);
+  console.log('fetching_kvs_endpoint');
   const response = await kvClient.send(getDataCmd);
-  console.log(`getDataCmd Response: ${JSON.stringify(response, null, 2)}`);
+  console.log('kvs_endpoint_received');
   const mediaClient = new KinesisVideoMedia({
     region: REGION,
     endpoint: response.DataEndpoint,
@@ -172,37 +179,35 @@ async function startTranscription(stream: Readable, meetingId: string) {
           event.TranscriptEvent.Transcript.Results.length > 0 &&
           event.TranscriptEvent.Transcript.Results[0].IsPartial == false
         ) {
-          console.log(
-            'NonPartial Event: ',
-            JSON.stringify(event.TranscriptEvent.Transcript),
-          );
+          const transcript = event.TranscriptEvent.Transcript.Results[0].Alternatives![0].Transcript!;
           const databaseResponse = await readMeetingInfoFromDB(meetingId);
-          await updateSIPMediaApplication({
-            transactionId: databaseResponse!.transactionId!.S!,
-            action: 'Thinking',
-          });
-          const prompt = preparePrompt(
-            event.TranscriptEvent.Transcript.Results[0].Alternatives![0]
-              .Transcript!,
-          );
-          console.log('Prompt: ', prompt);
-          const bedrockResponse = await bedrockClient.send(
-            new InvokeModelCommand(prompt),
-          );
-
-          let text = JSON.parse(
-            new TextDecoder().decode(bedrockResponse.body),
-          ).content[0].text;
-          text = text.replace(/'/g, '’'); // Replacing ' with ’
-          text = text.replace(/:/g, '.'); // Replacing : with .
-          text = text.replace(/\n/g, ' '); // Remove \n
-          console.log('Bedrock Text: ', text);
-
-          await updateSIPMediaApplication({
-            transactionId: databaseResponse!.transactionId!.S!,
-            action: 'Response',
-            text: text,
-          });
+          if (!databaseResponse?.transactionId?.S) {
+            console.error('final_transcript_failed code=MEETING_NOT_FOUND');
+            continue;
+          }
+          try {
+            const status = await handleFinalTranscript({
+              route: RESPONSE_ROUTE,
+              meetingId,
+              transcript,
+              deduplicator: transcriptDeduplicator,
+              sendThinking: async () => updateSIPMediaApplication({
+                transactionId: databaseResponse.transactionId!.S!, action: 'Thinking',
+              }),
+              invokeBedrock: async (requestTranscript) => invokeBedrock(requestTranscript),
+              invokeIgorBridge: async (requestTranscript, requestMeetingId) =>
+                invokeIgorBridge(requestTranscript, requestMeetingId),
+              sendResponse: async (text) => updateSIPMediaApplication({
+                transactionId: databaseResponse.transactionId!.S!, action: 'Response', text,
+              }),
+            });
+            console.log(`final_transcript_${status} route=${RESPONSE_ROUTE}`);
+          } catch (error) {
+            // Do not log caller content, identity, audio, credentials, or provider payloads.
+            const code = error instanceof Error && error.message === 'invalid response route configuration'
+              ? 'INVALID_ROUTE' : 'ROUTING_FAILED';
+            console.error(`final_transcript_failed route=${RESPONSE_ROUTE} code=${code}`);
+          }
         }
       }
     } else {
@@ -211,6 +216,28 @@ async function startTranscription(stream: Readable, meetingId: string) {
   } catch (error) {
     console.error('Error in transcription:', error);
   }
+}
+
+async function invokeBedrock(transcript: string): Promise<string> {
+  const bedrockResponse = await bedrockClient.send(
+    new InvokeModelCommand(preparePrompt(transcript)),
+  );
+  return JSON.parse(new TextDecoder().decode(bedrockResponse.body)).content[0].text;
+}
+
+async function invokeIgorBridge(transcript: string, meetingId: string): Promise<string> {
+  if (!IGOR_BRIDGE_FUNCTION_NAME) throw new Error('igor bridge is not configured');
+  const result = await lambdaClient.send(new InvokeCommand({
+    FunctionName: IGOR_BRIDGE_FUNCTION_NAME,
+    InvocationType: 'RequestResponse',
+    Payload: new TextEncoder().encode(JSON.stringify({ transcript, meeting_id: meetingId })),
+  }));
+  if (result.FunctionError || !result.Payload) throw new Error('igor bridge invocation failed');
+  const response = JSON.parse(new TextDecoder().decode(result.Payload));
+  if (typeof response.response !== 'string' || !response.response) {
+    throw new Error('igor bridge returned no response');
+  }
+  return response.response;
 }
 
 function preparePrompt(promptRequest: string) {
@@ -277,13 +304,7 @@ async function updateSIPMediaApplication(
     TransactionId: transactionId,
     Arguments: { Function: action, ...(text ? { Text: text } : null) },
   };
-  console.log(
-    `Params for UpdateSipMediaApplicationCall: ${JSON.stringify(
-      params,
-      null,
-      2,
-    )}`,
-  );
+  console.log(`sip_update action=${action}`);
   try {
     await chimeSdkVoiceClient.send(
       new UpdateSipMediaApplicationCallCommand(params),

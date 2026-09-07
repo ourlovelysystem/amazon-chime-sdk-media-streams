@@ -1,5 +1,5 @@
 /* eslint-disable import/no-extraneous-dependencies */
-import { App, CfnOutput, Stack, StackProps } from 'aws-cdk-lib';
+import { App, CfnOutput, CfnParameter, Stack, StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { config } from 'dotenv';
 import {
@@ -28,6 +28,11 @@ export class AmazonChimeSDKMediaStreams extends Stack {
     props: AmazonChimeSDKMediaStreamsProps,
   ) {
     super(scope, id, props);
+
+    const sourceRevision = new CfnParameter(this, 'SourceRevisionParameter', {
+      type: 'String', default: 'UNSET',
+      description: 'Immutable Git revision used for this deployment.',
+    });
 
     const kinesisVideoPoolStreamResources = new KinesisVideoStreamPoolResources(
       this,
@@ -63,6 +68,7 @@ export class AmazonChimeSDKMediaStreams extends Stack {
       vpc: vpcResources.vpc,
       albSecurityGroup: vpcResources.albSecurityGroup,
       callsPerTaskMetric: cloudWatchResources.callsPerTaskMetric,
+      igorBridgeFunctionArn: 'arn:aws:lambda:us-east-1:867712763388:function:igor-reference-compatible-igor-bridge',
     });
 
     new EventBridgeResources(this, 'eventBridgeResources', {
@@ -82,6 +88,8 @@ export class AmazonChimeSDKMediaStreams extends Stack {
       userPool: cognitoResources.userPool,
       meetingTable: databaseResources.meetingTable,
     });
+
+    new CfnOutput(this, 'SourceRevisionOutput', { value: sourceRevision.valueAsString });
 
     new CfnOutput(this, 'PhoneNumber', {
       value: sipMediaApplication.phoneNumber.phoneNumber,
