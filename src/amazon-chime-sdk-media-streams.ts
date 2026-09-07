@@ -1,5 +1,5 @@
 /* eslint-disable import/no-extraneous-dependencies */
-import { App, CfnCondition, CfnOutput, CfnParameter, Fn, Stack, StackProps } from 'aws-cdk-lib';
+import { App, CfnCondition, CfnOutput, CfnParameter, Fn, Stack, StackProps, Tags } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { config } from 'dotenv';
 import {
@@ -34,6 +34,8 @@ export class AmazonChimeSDKMediaStreams extends Stack {
       default: 'UNSET',
       description: 'Immutable Git revision used for this deployment.',
     });
+    // CloudFormation stack tag gives deployment verification an immutable source identity.
+    Tags.of(this).add('SourceRevision', sourceRevision.valueAsString);
 
     const responseRoute = new CfnParameter(this, 'ResponseRouteParameter', {
       type: 'String',
