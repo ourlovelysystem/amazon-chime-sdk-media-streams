@@ -35,7 +35,7 @@ export class AmazonChimeSDKMediaStreams extends Stack {
       description: 'Immutable Git revision used for this deployment.',
     });
     // CloudFormation stack tag gives deployment verification an immutable source identity.
-    Tags.of(this).add('SourceRevision', sourceRevision.valueAsString);
+    Tags.of(this).add('SourceRevision', process.env.SOURCE_REVISION || 'UNSET');
 
     const responseRoute = new CfnParameter(this, 'ResponseRouteParameter', {
       type: 'String',
