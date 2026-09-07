@@ -1,5 +1,5 @@
 /* eslint-disable import/no-extraneous-dependencies */
-import { Duration, Stack } from 'aws-cdk-lib';
+import { Duration, Fn, Stack } from 'aws-cdk-lib';
 import { Table } from 'aws-cdk-lib/aws-dynamodb';
 import {
   ServicePrincipal,
@@ -8,7 +8,7 @@ import {
   PolicyDocument,
   PolicyStatement,
 } from 'aws-cdk-lib/aws-iam';
-import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Architecture, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
 import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
@@ -26,6 +26,8 @@ interface SIPMediaApplicationProps {
   meetingTable: Table;
   wavBucket: Bucket;
   callCountTable: Table;
+  // Logical ID of the stack condition selecting the authenticated Igor handler.
+  useIgorAuthenticatedIngressCondition: string;
 }
 export class SIPMediaApplication extends Construct {
   public phoneNumber: ChimePhoneNumber;
@@ -77,9 +79,16 @@ export class SIPMediaApplication extends Construct {
       },
     });
 
+    // The false branch remains this original Lambda. Fn::If is resolved by the existing
+    // SMA custom resource during an in-place UpdateSipMediaApplication call.
+    const selectedIngressHandlerArn = Fn.conditionIf(
+      props.useIgorAuthenticatedIngressCondition,
+      'arn:aws:lambda:us-east-1:867712763388:function:igor-reference-compatible-voice',
+      smaHandlerLambda.functionArn,
+    );
     this.sipMediaApp = new ChimeSipMediaApp(this, 'sipMediaApp', {
       region: Stack.of(this).region,
-      endpoint: smaHandlerLambda.functionArn,
+      endpoint: selectedIngressHandlerArn as unknown as Function['functionArn'],
     });
 
     new ChimeSipRule(this, 'sipRule', {

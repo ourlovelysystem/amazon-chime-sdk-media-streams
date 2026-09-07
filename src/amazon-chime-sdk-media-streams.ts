@@ -1,5 +1,5 @@
 /* eslint-disable import/no-extraneous-dependencies */
-import { App, CfnOutput, CfnParameter, Stack, StackProps } from 'aws-cdk-lib';
+import { App, CfnCondition, CfnOutput, CfnParameter, Fn, Stack, StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { config } from 'dotenv';
 import {
@@ -30,13 +30,26 @@ export class AmazonChimeSDKMediaStreams extends Stack {
     super(scope, id, props);
 
     const sourceRevision = new CfnParameter(this, 'SourceRevisionParameter', {
-      type: 'String', default: 'UNSET',
+      type: 'String',
+      default: 'UNSET',
       description: 'Immutable Git revision used for this deployment.',
     });
 
     const responseRoute = new CfnParameter(this, 'ResponseRouteParameter', {
-      type: 'String', default: 'bedrock', allowedValues: ['bedrock', 'igor_bridge'],
+      type: 'String',
+      default: 'bedrock',
+      allowedValues: ['bedrock', 'igor_bridge'],
       description: 'Final transcript route; bedrock is the immediate rollback option.',
+    });
+
+    const ingressHandler = new CfnParameter(this, 'IngressHandlerParameter', {
+      type: 'String',
+      default: 'reference',
+      allowedValues: ['reference', 'igor_authenticated'],
+      description: 'SMA ingress selection; reference is the immediate rollback option.',
+    });
+    const useIgorAuthenticatedIngress = new CfnCondition(this, 'UseIgorAuthenticatedIngress', {
+      expression: Fn.conditionEquals(ingressHandler.valueAsString, 'igor_authenticated'),
     });
 
     const kinesisVideoPoolStreamResources = new KinesisVideoStreamPoolResources(
@@ -64,6 +77,7 @@ export class AmazonChimeSDKMediaStreams extends Stack {
         meetingTable: databaseResources.meetingTable,
         wavBucket: s3Resources.outgoingWav,
         callCountTable: databaseResources.callCountTable,
+        useIgorAuthenticatedIngressCondition: useIgorAuthenticatedIngress.logicalId,
       },
     );
 
@@ -96,6 +110,10 @@ export class AmazonChimeSDKMediaStreams extends Stack {
     });
 
     new CfnOutput(this, 'SourceRevisionOutput', { value: sourceRevision.valueAsString });
+    new CfnOutput(this, 'IngressHandlerSelection', { value: ingressHandler.valueAsString });
+    new CfnOutput(this, 'AuthenticatedIgorIngressHandlerArn', {
+      value: 'arn:aws:lambda:us-east-1:867712763388:function:igor-reference-compatible-voice',
+    });
 
     new CfnOutput(this, 'PhoneNumber', {
       value: sipMediaApplication.phoneNumber.phoneNumber,
