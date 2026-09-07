@@ -1,6 +1,6 @@
 /* eslint-disable import/no-extraneous-dependencies */
 /*eslint import/no-unresolved: 0 */
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash, createHmac, timingSafeEqual } from 'crypto';
 import {
   ChimeSDKMeetingsClient,
   DeleteMeetingCommand,
@@ -12,7 +12,9 @@ import {
   DynamoDBClient,
   PutItemCommand,
   UpdateItemCommand,
+  GetItemCommand,
 } from '@aws-sdk/client-dynamodb';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 
 import {
   ActionTypes,
@@ -31,6 +33,20 @@ import {
 const MEETING_TABLE = process.env.MEETING_TABLE;
 const CALL_COUNT_TABLE = process.env.CALL_COUNT_TABLE;
 const WAV_BUCKET = process.env.WAV_BUCKET || '';
+const TELEPHONE_CALLS_TABLE = process.env.TELEPHONE_CALLS_TABLE || '';
+const TELEPHONE_AUTH_SECRET_NAME = process.env.TELEPHONE_AUTH_SECRET_NAME || '';
+const MAX_PIN_ATTEMPTS = 3;
+const ASSERTION_SECONDS = 900;
+const secretsClient = new SecretsManagerClient({ region: 'us-east-1' });
+
+type AuthSecret = { allow_any_caller?: boolean; pin?: string };
+const opaque = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
+const digits = (event: SipMediaApplicationEvent) => String((event.ActionData as any)?.ReceivedDigits || (event.ActionData as any)?.Parameters?.ReceivedDigits || '').replace(/#$/, '');
+export const pinPrompt = (callId: string, retry = false) => ({ Type: ActionTypes.SPEAK_AND_GET_DIGITS, Parameters: { CallId: callId, InputDigitsRegex: '^[0-9]{1,32}#$', SpeechParameters: { Text: retry ? 'PIN was not accepted. Enter your PIN followed by pound.' : 'Welcome to Igor. Enter your PIN followed by pound.', Engine: Engine.NEURAL, LanguageCode: PollyLanguageCodes.EN_US, TextType: TextType.TEXT, VoiceId: PollyVoiceIds.JOANNA }, FailureSpeechParameters: { Text: 'Authentication failed. Goodbye.', Engine: Engine.NEURAL, LanguageCode: PollyLanguageCodes.EN_US, TextType: TextType.TEXT, VoiceId: PollyVoiceIds.JOANNA }, MinNumberOfDigits: 1, MaxNumberOfDigits: 32, TerminatorDigits: ['#'], InBetweenDigitsDurationInMilliseconds: 5000, Repeat: 0, RepeatDurationInMilliseconds: 0 } } as Actions);
+async function authSecret(): Promise<AuthSecret> { if (!TELEPHONE_AUTH_SECRET_NAME) return {}; const out = await secretsClient.send(new GetSecretValueCommand({ SecretId: TELEPHONE_AUTH_SECRET_NAME })); return JSON.parse(out.SecretString || '{}') as AuthSecret; }
+async function putAuth(callId: string, fields: Record<string, any>) { await ddbClient.send(new PutItemCommand({ TableName: TELEPHONE_CALLS_TABLE, Item: { call_id: { S: callId }, record_key: { S: 'CALL' }, raw_audio_retained: { BOOL: false }, ...fields } })); }
+export function assertion(callId: string, conversationId: string, pin: string) { const raw = JSON.stringify({ v: 1, call_id: callId, conversation_id: conversationId, exp: Math.floor(Date.now() / 1000) + ASSERTION_SECONDS }); return `${Buffer.from(raw).toString('base64url')}.${createHmac('sha256', pin).update(raw).digest('hex')}`; }
+
 
 const ddbClient = new DynamoDBClient({ region: 'us-east-1' });
 const chimeSDKMeetingClient = new ChimeSDKMeetingsClient({
@@ -63,53 +79,59 @@ export const lambdaHandler = async (
       console.log('RINGING');
       actions = [];
       break;
-    case InvocationEventType.NEW_INBOUND_CALL:
-      console.log('NEW_INBOUND_CALL');
-      meetingInfo = await createMeeting();
-      await writeMeetingInfoToDB(
-        meetingInfo.Meeting!.MeetingId!,
-        event.CallDetails.TransactionId,
-      );
-      await updateCallCount(1);
-      transactionAttributes.MeetingId = meetingInfo.Meeting!.MeetingId!;
-      actions = [
-        joinChimeMeetingAction(
-          meetingInfo,
-          event.CallDetails.Participants[0].CallId,
-        ),
-      ];
-      break;
-
-    case InvocationEventType.ACTION_SUCCESSFUL:
-      console.log('ACTION SUCCESSFUL');
-      const legAParticipant = event.CallDetails.Participants.find(
-        (participant) => participant.ParticipantTag === 'LEG-A',
-      );
-      const legBParticipant = event.CallDetails.Participants.find(
-        (participant) => participant.ParticipantTag === 'LEG-B',
-      );
-
-      transactionAttributes.CallIdLegA = legAParticipant
-        ? legAParticipant.CallId
-        : '';
-      transactionAttributes.CallIdLegB = legBParticipant
-        ? legBParticipant.CallId
-        : '';
-
-      switch (event.ActionData!.Type) {
-        case ActionTypes.JOIN_CHIME_MEETING:
-          console.log('JOIN_CHIME_MEETING');
-          actions = [
-            speakAction(
-              'Please wait while we connect you with a bot.  You can ask a question and the bot will query Bedrock.',
-              transactionAttributes.CallIdLegA,
-            ),
-          ];
-          break;
-        default:
-          break;
+    case InvocationEventType.NEW_INBOUND_CALL: {
+      // Never join media or issue an assertion until the existing telephone PIN verifies.
+      const secret = await authSecret();
+      const callId = opaque(event.CallDetails.TransactionId);
+      const leg = event.CallDetails.Participants.find((p) => p.ParticipantTag === 'LEG-A')?.CallId || '';
+      if (secret.allow_any_caller !== true || !secret.pin || !TELEPHONE_CALLS_TABLE) {
+        actions = [speakAction('Telephone authentication is unavailable.', leg), hangupAction(leg)];
+      } else {
+        await putAuth(callId, { authentication: { S: 'PIN_REQUIRED' }, pin_attempts: { N: '0' } });
+        transactionAttributes.IgorAuthState = 'PIN_REQUIRED';
+        actions = [pinPrompt(leg)];
       }
       break;
+    }
+
+    case InvocationEventType.ACTION_SUCCESSFUL: {
+      const legAParticipant = event.CallDetails.Participants.find((participant) => participant.ParticipantTag === 'LEG-A');
+      const legBParticipant = event.CallDetails.Participants.find((participant) => participant.ParticipantTag === 'LEG-B');
+      transactionAttributes.CallIdLegA = legAParticipant ? legAParticipant.CallId : '';
+      transactionAttributes.CallIdLegB = legBParticipant ? legBParticipant.CallId : '';
+      const callId = opaque(event.CallDetails.TransactionId);
+      if (event.ActionData!.Type === ActionTypes.SPEAK_AND_GET_DIGITS || digits(event)) {
+        const secret = await authSecret();
+        const call = await ddbClient.send(new GetItemCommand({ TableName: TELEPHONE_CALLS_TABLE, Key: { call_id: { S: callId }, record_key: { S: 'CALL' } }, ConsistentRead: true }));
+        const attempts = Number(call.Item?.pin_attempts?.N || '0');
+        const submitted = digits(event);
+        const expected = secret.pin ? Buffer.from(secret.pin) : Buffer.alloc(0);
+        const received = Buffer.from(submitted);
+        const ok = call.Item?.authentication?.S === 'PIN_REQUIRED' && expected.length > 0 && expected.length === received.length && timingSafeEqual(expected, received);
+        if (!ok) {
+          if (attempts + 1 >= MAX_PIN_ATTEMPTS) {actions = [speakAction('Authentication failed. Goodbye.', transactionAttributes.CallIdLegA), hangupAction(transactionAttributes.CallIdLegA)];} else { await putAuth(callId, { authentication: { S: 'PIN_REQUIRED' }, pin_attempts: { N: String(attempts + 1) } }); actions = [pinPrompt(transactionAttributes.CallIdLegA, true)]; }
+          break;
+        }
+        meetingInfo = await createMeeting();
+        const meetingId = meetingInfo.Meeting!.MeetingId!;
+        const conversationId = opaque(event.CallDetails.TransactionId);
+        const signed = assertion(callId, conversationId, secret.pin!);
+        await writeMeetingInfoToDB(meetingId, event.CallDetails.TransactionId);
+        await putAuth(callId, { authentication: { S: 'AUTHENTICATED' }, meeting_id: { S: meetingId }, conversation_id: { S: conversationId }, authenticated_assertion: { S: signed }, assertion_expires_at: { N: String(Math.floor(Date.now() / 1000) + ASSERTION_SECONDS) } });
+        await updateCallCount(1);
+        transactionAttributes.MeetingId = meetingId;
+        transactionAttributes.IgorConversationId = conversationId;
+        actions = [joinChimeMeetingAction(meetingInfo, transactionAttributes.CallIdLegA)];
+        break;
+      }
+      switch (event.ActionData!.Type) {
+        case ActionTypes.JOIN_CHIME_MEETING:
+          actions = [speakAction('Please wait while we connect you with Igor.', transactionAttributes.CallIdLegA)];
+          break;
+        default: break;
+      }
+      break;
+    }
 
     case InvocationEventType.CALL_UPDATE_REQUESTED:
       console.log('CALL_UPDATE_REQUESTED');

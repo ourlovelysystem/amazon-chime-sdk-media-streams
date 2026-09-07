@@ -11,6 +11,7 @@ import {
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
+import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import {
   ChimeSipMediaApp,
   ChimePhoneNumber,
@@ -91,5 +92,13 @@ export class SIPMediaApplication extends Construct {
 
     props.meetingTable.grantReadWriteData(smaHandlerLambda);
     props.callCountTable.grantReadWriteData(smaHandlerLambda);
+    // Existing Igor authentication state only; this does not create another route or media resource.
+    const telephoneCalls = Table.fromTableName(this, 'IgorTelephoneCalls', 'igor-TelephoneCallsTable-1X2UCGUL3VYHB');
+    const telephoneSecret = Secret.fromSecretNameV2(this, 'IgorTelephoneAuth', 'igor/telephone-auth');
+    telephoneCalls.grantReadWriteData(smaHandlerLambda);
+    telephoneSecret.grantRead(smaHandlerLambda);
+    smaHandlerLambda.addEnvironment('TELEPHONE_CALLS_TABLE', telephoneCalls.tableName);
+    smaHandlerLambda.addEnvironment('TELEPHONE_AUTH_SECRET_NAME', telephoneSecret.secretName);
+
   }
 }
