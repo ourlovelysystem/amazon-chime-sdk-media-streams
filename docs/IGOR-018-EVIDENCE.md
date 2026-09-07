@@ -29,3 +29,9 @@ No Connect, phone number, KVS stream/pool, Fargate service, VPC/NAT, Transcribe 
 ## Remaining physical requirement
 
 After all nonphysical checks pass, place **one** authorized test call through the existing reference number, ask one harmless question, and confirm one audible answer; report the observed result without recording caller identity, audio, transcript, PIN, or credentials. Until then IGOR-018 remains **IN PROGRESS**.
+
+## Deployment evidence (2026-09-07)
+
+The existing `AmazonChimeSDKMediaStreams` stack was updated successfully from published source revision `9e62ce0d9762400110e6efb8a6bbceb35b8ea13f` (the source implementation commit). CloudFormation reports `UPDATE_COMPLETE`, `SourceRevisionParameter` and `SourceRevisionOutput` both equal that SHA, and `ResponseRouteParameter=igor_bridge`. The active ECS task definition is revision `:3`; its environment contains `RESPONSE_ROUTE=igor_bridge` and the deployed bridge ARN. The existing task role's `IgorBridgePolicy` allows only `lambda:InvokeFunction` on that bridge ARN. The existing service reached steady state and has a healthy target.
+
+Nonphysical synthetic verification then invoked the live bridge and the same consumer response-delivery callback once each (`thinking_actions=1`, `response_actions=1`); response content was redacted. The original Bedrock path and duplicate/failure handling remain covered by the committed unit test. This is not a physical telephone result. **IGOR-018 remains IN PROGRESS.**
