@@ -12,6 +12,7 @@ import { Architecture, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
 import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import { AwsCustomResource, AwsCustomResourcePolicy, PhysicalResourceId } from 'aws-cdk-lib/custom-resources';
 import {
   ChimeSipMediaApp,
   ChimePhoneNumber,
@@ -28,6 +29,7 @@ interface SIPMediaApplicationProps {
   callCountTable: Table;
   // Logical ID of the stack condition selecting the authenticated Igor handler.
   useIgorAuthenticatedIngressCondition: string;
+  sourceRevision: string;
 }
 export class SIPMediaApplication extends Construct {
   public phoneNumber: ChimePhoneNumber;
@@ -94,7 +96,39 @@ export class SIPMediaApplication extends Construct {
     });
     // The custom resource preserves this physical SMA on updates but omits its
     // attribute in an Update response. Downstream resources must use its known ID.
-    (this.sipMediaApp as any).sipMediaAppId = '17bd43cc-b102-47d8-902d-69d4db65dba6';
+    const referenceSipMediaApplicationId = '17bd43cc-b102-47d8-902d-69d4db65dba6';
+    (this.sipMediaApp as any).sipMediaAppId = referenceSipMediaApplicationId;
+
+    // The third-party provider acknowledges SMA updates without invoking Chime.
+    // Reconcile the already-owned SMA endpoint in place on every source revision.
+    // This never creates a phone number, SIP rule, SMA, or media pipeline.
+    const enforceAuthenticatedIngress = new AwsCustomResource(this, 'enforceAuthenticatedIngress', {
+      onCreate: {
+        service: 'ChimeSDKVoice',
+        action: 'updateSipMediaApplication',
+        parameters: {
+          SipMediaApplicationId: referenceSipMediaApplicationId,
+          Endpoints: [{ LambdaArn: selectedIngressHandlerArn }],
+        },
+        physicalResourceId: PhysicalResourceId.of(`igor-reference-ingress-${props.sourceRevision}`),
+      },
+      onUpdate: {
+        service: 'ChimeSDKVoice',
+        action: 'updateSipMediaApplication',
+        parameters: {
+          SipMediaApplicationId: referenceSipMediaApplicationId,
+          Endpoints: [{ LambdaArn: selectedIngressHandlerArn }],
+        },
+        physicalResourceId: PhysicalResourceId.of(`igor-reference-ingress-${props.sourceRevision}`),
+      },
+      policy: AwsCustomResourcePolicy.fromStatements([
+        new PolicyStatement({
+          actions: ['chime:UpdateSipMediaApplication'],
+          resources: [`arn:aws:chime:${Stack.of(this).region}:${Stack.of(this).account}:sma/${referenceSipMediaApplicationId}`],
+        }),
+      ]),
+    });
+    enforceAuthenticatedIngress.node.addDependency(this.sipMediaApp);
 
     new ChimeSipRule(this, 'sipRule', {
       triggerType: TriggerType.TO_PHONE_NUMBER,

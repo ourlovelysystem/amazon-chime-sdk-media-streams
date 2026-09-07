@@ -78,6 +78,7 @@ export class AmazonChimeSDKMediaStreams extends Stack {
         wavBucket: s3Resources.outgoingWav,
         callCountTable: databaseResources.callCountTable,
         useIgorAuthenticatedIngressCondition: useIgorAuthenticatedIngress.logicalId,
+        sourceRevision: sourceRevision.valueAsString,
       },
     );
 
