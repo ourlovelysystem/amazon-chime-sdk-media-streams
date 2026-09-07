@@ -84,7 +84,7 @@ fastify.post('/call', async (request, reply) => {
     });
     console.log('Streaming and conversion to PCM completed');
   } catch (error) {
-    console.error('Error:', error);
+    console.error('call_processing_failed');
     await reply.status(500).send({ error: 'Internal Server Error' });
   }
 });
@@ -119,7 +119,7 @@ async function readKVSConvertWriteAndTranscribe({
       StartSelectorType: StartSelectorType.NOW,
     },
   };
-  console.log(`FragmentSelector: ${JSON.stringify(fragmentSelector, null, 2)}`);
+  console.log('kvs_fragment_selector_ready');
   const result = await mediaClient.getMedia(fragmentSelector);
   const readableStream = (await result.Payload) as Readable;
   const outputStream = new PassThrough();
@@ -133,8 +133,8 @@ async function readKVSConvertWriteAndTranscribe({
     .output(outputStream, { end: true })
     .run();
 
-  startTranscription(outputStream, meetingId).catch((error) => {
-    console.error('Transcription error:', error);
+  startTranscription(outputStream, meetingId).catch(() => {
+    console.error('transcription_stream_failed');
   });
 }
 
@@ -214,7 +214,7 @@ async function startTranscription(stream: Readable, meetingId: string) {
       console.error('TranscriptResultStream is undefined');
     }
   } catch (error) {
-    console.error('Error in transcription:', error);
+    console.error('transcription_processing_failed');
   }
 }
 
@@ -276,14 +276,14 @@ async function readMeetingInfoFromDB(meetingId: string) {
   try {
     const data = await ddbClient.send(new GetItemCommand(params));
     if (data.Item) {
-      console.log(`Retrieved meeting info for meetingId: ${meetingId}`);
+      console.log('meeting_info_found');
       return data.Item;
     } else {
-      console.log(`No meeting found for meetingId: ${meetingId}`);
+      console.log('meeting_info_missing');
       return null;
     }
   } catch (error) {
-    console.error(`Error reading from DB: ${error}`);
+    console.error('meeting_info_read_failed');
     throw error;
   }
 }
@@ -310,7 +310,7 @@ async function updateSIPMediaApplication(
       new UpdateSipMediaApplicationCallCommand(params),
     );
   } catch (error) {
-    console.error('Error Updating SIP Media Application: ', error);
+    console.error('sip_update_failed');
     throw error;
   }
 }
