@@ -32,6 +32,8 @@ interface SIPMediaApplicationProps {
 export class SIPMediaApplication extends Construct {
   public phoneNumber: ChimePhoneNumber;
   public sipMediaApp: ChimeSipMediaApp;
+  // This repository owns one pre-existing reference SMA; its ID is stable and avoids
+  // requiring an update response attribute from the third-party custom resource.
 
   constructor(scope: Construct, id: string, props: SIPMediaApplicationProps) {
     super(scope, id);
@@ -90,6 +92,9 @@ export class SIPMediaApplication extends Construct {
       region: Stack.of(this).region,
       endpoint: selectedIngressHandlerArn as unknown as Function['functionArn'],
     });
+    // The custom resource preserves this physical SMA on updates but omits its
+    // attribute in an Update response. Downstream resources must use its known ID.
+    (this.sipMediaApp as any).sipMediaAppId = '17bd43cc-b102-47d8-902d-69d4db65dba6';
 
     new ChimeSipRule(this, 'sipRule', {
       triggerType: TriggerType.TO_PHONE_NUMBER,
