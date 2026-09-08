@@ -9,7 +9,6 @@ import {
   UpdateSipMediaApplicationCallCommand,
 } from '@aws-sdk/client-chime-sdk-voice';
 import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
-import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import {
   KinesisVideoClient,
   GetDataEndpointCommand,
@@ -20,6 +19,7 @@ import {
   GetMediaCommandInput,
   StartSelectorType,
 } from '@aws-sdk/client-kinesis-video-media';
+import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import {
   TranscribeStreamingClient,
   StartStreamTranscriptionCommand,
@@ -28,6 +28,7 @@ import {
 } from '@aws-sdk/client-transcribe-streaming';
 import Fastify from 'fastify';
 import ffmpeg from 'fluent-ffmpeg';
+import { trace } from './observability';
 import { handleFinalTranscript, TranscriptDeduplicator } from './routing';
 
 const fastify = Fastify({
@@ -70,11 +71,10 @@ interface Event {
 fastify.post('/call', async (request, reply) => {
   try {
     const event = request.body as Event;
-    console.log('call_received');
+    trace('consumer_call_received', event.meetingId);
 
     const streamArn = event.callerStreamArn;
     const meetingId = event.meetingId;
-    console.log('Starting KVS Convert');
     await reply.send({
       message: 'Request received. Processing in progress...',
     });
@@ -82,7 +82,7 @@ fastify.post('/call', async (request, reply) => {
       streamArn,
       meetingId,
     });
-    console.log('Streaming and conversion to PCM completed');
+    trace('consumer_stream_started', meetingId, 'success');
   } catch (error) {
     console.error('call_processing_failed');
     await reply.status(500).send({ error: 'Internal Server Error' });
@@ -97,32 +97,38 @@ async function readKVSConvertWriteAndTranscribe({
   streamArn,
   meetingId,
 }: KVSStreamDetails): Promise<void> {
-  console.log('Initializing media stream client');
+  trace('kvs_endpoint_requested', meetingId);
   const kvClient = new KinesisVideoClient({ region: REGION });
   const getDataCmd = new GetDataEndpointCommand({
     APIName: APIName.GET_MEDIA,
     StreamARN: streamArn,
   });
 
-  console.log('fetching_kvs_endpoint');
   const response = await kvClient.send(getDataCmd);
-  console.log('kvs_endpoint_received');
+  trace('kvs_endpoint_received', meetingId);
   const mediaClient = new KinesisVideoMedia({
     region: REGION,
     endpoint: response.DataEndpoint,
   });
 
-  console.log('Setting up fragment selector');
   const fragmentSelector: GetMediaCommandInput = {
     StreamARN: streamArn,
     StartSelector: {
       StartSelectorType: StartSelectorType.NOW,
     },
   };
-  console.log('kvs_fragment_selector_ready');
+  trace('kvs_media_requested', meetingId);
   const result = await mediaClient.getMedia(fragmentSelector);
+  trace('kvs_media_opened', meetingId);
   const readableStream = (await result.Payload) as Readable;
   const outputStream = new PassThrough();
+  let observedAudio = false;
+  outputStream.on('data', () => {
+    if (!observedAudio) {
+      observedAudio = true;
+      trace('audio_received', meetingId);
+    }
+  });
 
   ffmpeg(readableStream)
     // .on('stderr', (data) => {
@@ -150,7 +156,7 @@ void start();
 
 async function startTranscription(stream: Readable, meetingId: string) {
   const client = new TranscribeStreamingClient({ region: REGION });
-  console.log('Starting Transcribe');
+  trace('transcribe_started', meetingId);
 
   const audioStream = async function* () {
     for await (const chunk of stream) {
@@ -167,6 +173,7 @@ async function startTranscription(stream: Readable, meetingId: string) {
     });
 
     const response = await client.send(command);
+    trace('transcribe_connected', meetingId);
 
     if (response.TranscriptResultStream) {
       for await (const event of response.TranscriptResultStream) {
@@ -180,11 +187,13 @@ async function startTranscription(stream: Readable, meetingId: string) {
           event.TranscriptEvent.Transcript.Results[0].IsPartial == false
         ) {
           const transcript = event.TranscriptEvent.Transcript.Results[0].Alternatives![0].Transcript!;
+          trace('final_transcript_received', meetingId);
           const databaseResponse = await readMeetingInfoFromDB(meetingId);
           if (!databaseResponse?.transactionId?.S) {
-            console.error('final_transcript_failed code=MEETING_NOT_FOUND');
+            trace('meeting_lookup_completed', meetingId, 'missing');
             continue;
           }
+          trace('meeting_lookup_completed', meetingId, 'success');
           try {
             const status = await handleFinalTranscript({
               route: RESPONSE_ROUTE,
@@ -192,29 +201,32 @@ async function startTranscription(stream: Readable, meetingId: string) {
               transcript,
               deduplicator: transcriptDeduplicator,
               sendThinking: async () => updateSIPMediaApplication({
-                transactionId: databaseResponse.transactionId!.S!, action: 'Thinking',
+                transactionId: databaseResponse.transactionId!.S!, action: 'Thinking', meetingId,
               }),
               invokeBedrock: async (requestTranscript) => invokeBedrock(requestTranscript),
               invokeIgorBridge: async (requestTranscript, requestMeetingId) =>
                 invokeIgorBridge(requestTranscript, requestMeetingId),
               sendResponse: async (text) => updateSIPMediaApplication({
-                transactionId: databaseResponse.transactionId!.S!, action: 'Response', text,
+                transactionId: databaseResponse.transactionId!.S!, action: 'Response', text, meetingId,
               }),
             });
             console.log(`final_transcript_${status} route=${RESPONSE_ROUTE}`);
+            trace('response_flow_completed', meetingId, status);
           } catch (error) {
             // Do not log caller content, identity, audio, credentials, or provider payloads.
             const code = error instanceof Error && error.message === 'invalid response route configuration'
               ? 'INVALID_ROUTE' : 'ROUTING_FAILED';
             console.error(`final_transcript_failed route=${RESPONSE_ROUTE} code=${code}`);
+            trace('response_flow_completed', meetingId, 'failure');
           }
         }
       }
+      trace('transcribe_completed', meetingId, 'success');
     } else {
-      console.error('TranscriptResultStream is undefined');
+      trace('transcribe_completed', meetingId, 'missing_result_stream');
     }
   } catch (error) {
-    console.error('transcription_processing_failed');
+    trace('transcribe_completed', meetingId, 'failure');
   }
 }
 
@@ -227,16 +239,22 @@ async function invokeBedrock(transcript: string): Promise<string> {
 
 async function invokeIgorBridge(transcript: string, meetingId: string): Promise<string> {
   if (!IGOR_BRIDGE_FUNCTION_NAME) throw new Error('igor bridge is not configured');
+  trace('igor_bridge_invocation_started', meetingId);
   const result = await lambdaClient.send(new InvokeCommand({
     FunctionName: IGOR_BRIDGE_FUNCTION_NAME,
     InvocationType: 'RequestResponse',
     Payload: new TextEncoder().encode(JSON.stringify({ transcript, meeting_id: meetingId })),
   }));
-  if (result.FunctionError || !result.Payload) throw new Error('igor bridge invocation failed');
+  if (result.FunctionError || !result.Payload) {
+    trace('igor_bridge_invocation_completed', meetingId, 'failure');
+    throw new Error('igor bridge invocation failed');
+  }
   const response = JSON.parse(new TextDecoder().decode(result.Payload));
   if (typeof response.response !== 'string' || !response.response) {
+    trace('igor_bridge_invocation_completed', meetingId, 'invalid_response');
     throw new Error('igor bridge returned no response');
   }
+  trace('igor_bridge_invocation_completed', meetingId, 'success');
   return response.response;
 }
 
@@ -292,6 +310,7 @@ interface UpdateSIPMediaApplicationOptions {
   transactionId: string;
   action: string;
   text?: string;
+  meetingId?: string;
 }
 
 async function updateSIPMediaApplication(
@@ -305,12 +324,16 @@ async function updateSIPMediaApplication(
     Arguments: { Function: action, ...(text ? { Text: text } : null) },
   };
   console.log(`sip_update action=${action}`);
+  const meetingId = options.meetingId;
+  if (meetingId) trace('sip_update_started', meetingId, action.toLowerCase());
   try {
     await chimeSdkVoiceClient.send(
       new UpdateSipMediaApplicationCallCommand(params),
     );
+    if (meetingId) trace('sip_update_completed', meetingId, 'success');
   } catch (error) {
     console.error('sip_update_failed');
+    if (meetingId) trace('sip_update_completed', meetingId, 'failure');
     throw error;
   }
 }
