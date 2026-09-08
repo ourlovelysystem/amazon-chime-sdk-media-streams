@@ -9,6 +9,7 @@ import {
 
 import { Handler } from 'aws-cdk-lib/aws-lambda';
 import axios from 'axios';
+import { trace } from './observability';
 import {
   MeetingEventType,
   MediaStreamPipelineEventType,
@@ -35,13 +36,11 @@ var AWS_REGION = process.env.AWS_REGION;
 var AWS_ACCOUNT = process.env.AWS_ACCOUNT;
 
 export const handler: Handler = async (event: EventBridge): Promise<null> => {
-  console.info(JSON.stringify(event, null, 2));
-
   switch (event['detail-type']) {
     case DetailType.CHIME_MEETING_STATE_CHANGE:
       switch (event.detail.eventType) {
         case MeetingEventType.MeetingStarted:
-          console.log('Meeting Started');
+          trace('meeting_event_received', event.detail.meetingId);
           if (event.detail.externalMeetingId === 'MediaStreams') {
             await startMediaStreamPipeline(event.detail);
           }
@@ -55,7 +54,7 @@ export const handler: Handler = async (event: EventBridge): Promise<null> => {
     case DetailType.CHIME_MEDIA_PIPELINE_STATE_CHANGE:
       switch (event.detail.eventType) {
         case MediaStreamPipelineEventType.MediaPipelineKinesisVideoStreamStart:
-          console.log('MediaPipelineKinesisVideoStreamStart');
+          trace('kvs_stream_discovered', event.detail.meetingId);
           const consumerInfo = {
             startFragmentNumber: event.detail.startFragmentNumber,
             meetingId: event.detail.meetingId,
@@ -77,6 +76,7 @@ export const handler: Handler = async (event: EventBridge): Promise<null> => {
 };
 
 async function startMediaStreamPipeline(eventDetail: MeetingEventDetails) {
+  trace('media_pipeline_create_started', eventDetail.meetingId);
   try {
     const params = {
       Sinks: [
@@ -94,27 +94,26 @@ async function startMediaStreamPipeline(eventDetail: MeetingEventDetails) {
         },
       ],
     };
-    console.log(
-      `CreateMediaStreamPipeline Params: ${JSON.stringify(params, null, 2)}`,
-    );
     await chimeSdkMediaPipelinesClient.send(
       new CreateMediaStreamPipelineCommand(params),
     );
-  } catch (error) {
-    throw new Error(`Error starting Streaming Pipeline: ${error}`);
+    trace('media_pipeline_create_completed', eventDetail.meetingId, 'success');
+  } catch (_error) {
+    trace('media_pipeline_create_completed', eventDetail.meetingId, 'failure');
+    throw new Error('Error starting Streaming Pipeline');
   }
 }
 
 async function startConsumer(consumerInfo: ConsumerInfo) {
-  console.log('Starting Consumer');
+  trace('consumer_dispatch_started', consumerInfo.meetingId);
   try {
-    const response = await axios.post(
+    await axios.post(
       `http://${KVS_CONSUMER_URL}/call`,
       consumerInfo,
     );
-    console.log('POST request response:', response.data);
-  } catch (error) {
-    console.error('Error:', error);
-    throw error;
+    trace('consumer_dispatch_completed', consumerInfo.meetingId, 'success');
+  } catch (_error) {
+    trace('consumer_dispatch_completed', consumerInfo.meetingId, 'failure');
+    throw new Error('Error starting media consumer');
   }
 }
