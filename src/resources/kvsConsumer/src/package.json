@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
-    "test": "yarn build && node dist/routing.test.js",
+    "test": "yarn build && node dist/routing.test.js && node dist/observability.test.js",
     "start": "node dist/index.js"
   },
   "license": "MIT",
