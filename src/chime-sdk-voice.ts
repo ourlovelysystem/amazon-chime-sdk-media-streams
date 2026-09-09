@@ -129,7 +129,10 @@ export class SIPMediaApplication extends Construct {
         // Chime validates the pre-existing invocation permission on the endpoint.
         new PolicyStatement({
           actions: ['lambda:GetPolicy'],
-          resources: ['arn:aws:lambda:us-east-1:867712763388:function:igor-reference-compatible-voice'],
+          resources: [
+            'arn:aws:lambda:us-east-1:867712763388:function:igor-reference-compatible-voice',
+            smaHandlerLambda.functionArn,
+          ],
         }),
       ]),
     });
